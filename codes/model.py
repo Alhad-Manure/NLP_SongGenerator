@@ -1,6 +1,6 @@
 """
 Transformer-based Hindi Song Lyrics Generator
-Using PyTorch!
+Built from scratch using PyTorch - much better than LSTM approach!
 """
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -232,41 +232,105 @@ class TransformerLyricsTrainer:
         self.model = None
     
     def prepare_data(self, lyrics_file, song_separator='\n--\n'):
-        """Load and prepare data"""
+        """
+        Load and prepare data - handles exact format with \n--\n separator
+        Preserves original structure of each song
+        """
         print(f"\nLoading lyrics from: {lyrics_file}")
         
         with open(lyrics_file, 'r', encoding='utf-8') as f:
             content = f.read()
         
-        # Split by song separator
+        # Split by exact separator '\n--\n'
         songs = content.split(song_separator)
-        songs = [song.strip() for song in songs if song.strip()]
         
-        print(f"Found {len(songs)} songs")
-        
-        # Build vocabulary
-        self.tokenizer.fit(songs)
-        
-        # Create sequences
-        sequences = []
+        # Clean up songs - remove leading/trailing whitespace but preserve internal structure
+        cleaned_songs = []
         for song in songs:
-            seq = self.tokenizer.encode(song)
+            song = song.strip()
+            if song:  # Only keep non-empty songs
+                cleaned_songs.append(song)
+        
+        print(f"✓ Found {len(cleaned_songs)} songs")
+        
+        # Show sample
+        if cleaned_songs:
+            print(f"\n--- Sample Song 1 (first 200 chars) ---")
+            print(cleaned_songs[0][:200])
+            print("..." if len(cleaned_songs[0]) > 200 else "")
+            print("-" * 50)
+        
+        # Build vocabulary from all songs
+        print("\nBuilding vocabulary...")
+        self.tokenizer.fit(cleaned_songs)
+        
+        # Create sequences - each song becomes one sequence
+        sequences = []
+        total_words = 0
+        
+        print("\nEncoding songs to sequences...")
+        for idx, song in enumerate(cleaned_songs):
+            seq = self.tokenizer.encode(song, add_special_tokens=True)
             sequences.append(seq)
+            total_words += len(seq)
+            
+            if (idx + 1) % 50 == 0:
+                print(f"  Encoded {idx + 1}/{len(cleaned_songs)} songs...")
+        
+        print(f"\n✓ Dataset prepared successfully!")
+        print(f"  Total songs: {len(sequences)}")
+        print(f"  Total words: {total_words:,}")
+        print(f"  Average words per song: {total_words // len(sequences)}")
+        print(f"  Vocabulary size: {self.tokenizer.vocab_size}")
+        
+        # Show sequence length distribution
+        seq_lengths = [len(seq) for seq in sequences]
+        print(f"\nSequence Length Statistics:")
+        print(f"  Min: {min(seq_lengths)}")
+        print(f"  Max: {max(seq_lengths)}")
+        print(f"  Average: {sum(seq_lengths) // len(seq_lengths)}")
+        print(f"  Median: {sorted(seq_lengths)[len(seq_lengths)//2]}")
         
         return sequences
     
     def train(self, sequences):
-        """Train the model"""
+        """Train the model with proper train/test split and evaluation"""
         print(f"\n{'='*60}")
         print("TRAINING TRANSFORMER MODEL")
         print(f"{'='*60}\n")
         
-        # Create dataset and dataloader
-        dataset = LyricsDataset(sequences, max_len=self.config['max_seq_length'])
-        dataloader = DataLoader(
-            dataset,
+        # Split sequences into train and test sets
+        from sklearn.model_selection import train_test_split
+        
+        train_sequences, test_sequences = train_test_split(
+            sequences,
+            test_size=self.config.get('test_size', 0.15),  # 15% for testing
+            random_state=42,
+            shuffle=True
+        )
+        
+        print(f"Dataset Split:")
+        print(f"  Total sequences: {len(sequences)}")
+        print(f"  Training sequences: {len(train_sequences)}")
+        print(f"  Test sequences: {len(test_sequences)}")
+        print(f"  Test ratio: {len(test_sequences)/len(sequences)*100:.1f}%\n")
+        
+        # Create datasets and dataloaders
+        train_dataset = LyricsDataset(train_sequences, max_len=self.config['max_seq_length'])
+        test_dataset = LyricsDataset(test_sequences, max_len=self.config['max_seq_length'])
+        
+        train_dataloader = DataLoader(
+            train_dataset,
             batch_size=self.config['batch_size'],
-            shuffle=True,
+            shuffle=True,  # Shuffle every epoch for better generalization
+            num_workers=0,
+            drop_last=True  # Drop incomplete batches
+        )
+        
+        test_dataloader = DataLoader(
+            test_dataset,
+            batch_size=self.config['batch_size'],
+            shuffle=False,  # Don't shuffle test set
             num_workers=0
         )
         
@@ -281,31 +345,71 @@ class TransformerLyricsTrainer:
             max_len=self.config['max_seq_length']
         ).to(self.device)
         
-        print(f"Model parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print(f"Model Architecture:")
+        print(f"  Total parameters: {total_params:,}")
+        print(f"  Trainable parameters: {trainable_params:,}")
+        print(f"  Model size: ~{total_params * 4 / 1024 / 1024:.2f} MB\n")
         
-        # Optimizer and scheduler
+        # Optimizer with weight decay for regularization
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config['learning_rate'],
-            weight_decay=0.01
+            weight_decay=self.config.get('weight_decay', 0.01),
+            betas=(0.9, 0.98),
+            eps=1e-9
         )
         
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.config['epochs']
+        # Learning rate scheduler with warmup
+        warmup_steps = self.config.get('warmup_steps', 500)
+        total_steps = len(train_dataloader) * self.config['epochs']
+        
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                return float(current_step) / float(max(1, warmup_steps))
+            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.1, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        
+        criterion = nn.CrossEntropyLoss(
+            ignore_index=0,  # Ignore padding
+            label_smoothing=self.config.get('label_smoothing', 0.1)  # Label smoothing for better generalization
         )
         
-        criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding
+        # Training history
+        history = {
+            'train_loss': [],
+            'test_loss': [],
+            'train_perplexity': [],
+            'test_perplexity': [],
+            'learning_rate': []
+        }
+        
+        best_test_loss = float('inf')
+        patience_counter = 0
+        patience = self.config.get('early_stopping_patience', 5)
         
         # Training loop
+        print(f"{'='*60}")
+        print("STARTING TRAINING")
+        print(f"{'='*60}\n")
+        
         for epoch in range(self.config['epochs']):
+            # ============ TRAINING PHASE ============
             self.model.train()
-            total_loss = 0
+            train_loss = 0
+            train_batches = 0
             
-            for batch_idx, (input_seq, target_seq) in enumerate(dataloader):
+            print(f"Epoch [{epoch+1}/{self.config['epochs']}]")
+            print("-" * 60)
+            
+            for batch_idx, (input_seq, target_seq) in enumerate(train_dataloader):
                 input_seq = input_seq.to(self.device)
                 target_seq = target_seq.to(self.device)
                 
-                # Generate mask
+                # Generate causal mask
                 seq_len = input_seq.size(1)
                 mask = self.model.generate_square_subsequent_mask(seq_len).to(self.device)
                 
@@ -319,29 +423,105 @@ class TransformerLyricsTrainer:
                     target_seq.reshape(-1)
                 )
                 
-                # Backward pass
+                # Backward pass with gradient clipping
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 
+                                              self.config.get('grad_clip', 1.0))
                 optimizer.step()
+                scheduler.step()
                 
-                total_loss += loss.item()
+                train_loss += loss.item()
+                train_batches += 1
                 
                 if (batch_idx + 1) % 10 == 0:
-                    print(f"Epoch [{epoch+1}/{self.config['epochs']}] "
-                          f"Batch [{batch_idx+1}/{len(dataloader)}] "
-                          f"Loss: {loss.item():.4f}")
+                    avg_loss = train_loss / train_batches
+                    perplexity = math.exp(min(avg_loss, 20))  # Cap for numerical stability
+                    print(f"  Batch [{batch_idx+1}/{len(train_dataloader)}] "
+                          f"Loss: {loss.item():.4f} | "
+                          f"Avg Loss: {avg_loss:.4f} | "
+                          f"Perplexity: {perplexity:.2f} | "
+                          f"LR: {scheduler.get_last_lr()[0]:.6f}")
             
-            avg_loss = total_loss / len(dataloader)
-            scheduler.step()
+            avg_train_loss = train_loss / train_batches
+            train_perplexity = math.exp(min(avg_train_loss, 20))
             
-            print(f"\nEpoch {epoch+1} Complete - Avg Loss: {avg_loss:.4f}")
-            print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}\n")
+            # ============ EVALUATION PHASE ============
+            self.model.eval()
+            test_loss = 0
+            test_batches = 0
             
-            # Save checkpoint
+            with torch.no_grad():
+                for input_seq, target_seq in test_dataloader:
+                    input_seq = input_seq.to(self.device)
+                    target_seq = target_seq.to(self.device)
+                    
+                    seq_len = input_seq.size(1)
+                    mask = self.model.generate_square_subsequent_mask(seq_len).to(self.device)
+                    
+                    output = self.model(input_seq, mask)
+                    loss = criterion(
+                        output.reshape(-1, self.tokenizer.vocab_size),
+                        target_seq.reshape(-1)
+                    )
+                    
+                    test_loss += loss.item()
+                    test_batches += 1
+            
+            avg_test_loss = test_loss / test_batches
+            test_perplexity = math.exp(min(avg_test_loss, 20))
+            
+            # Save history
+            history['train_loss'].append(avg_train_loss)
+            history['test_loss'].append(avg_test_loss)
+            history['train_perplexity'].append(train_perplexity)
+            history['test_perplexity'].append(test_perplexity)
+            history['learning_rate'].append(scheduler.get_last_lr()[0])
+            
+            # Print epoch summary
+            print(f"\n{'='*60}")
+            print(f"EPOCH {epoch+1} SUMMARY")
+            print(f"{'='*60}")
+            print(f"  Train Loss: {avg_train_loss:.4f} | Perplexity: {train_perplexity:.2f}")
+            print(f"  Test Loss:  {avg_test_loss:.4f} | Perplexity: {test_perplexity:.2f}")
+            print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
+            
+            # Check for improvement
+            if avg_test_loss < best_test_loss:
+                best_test_loss = avg_test_loss
+                patience_counter = 0
+                print(f"  ✓ New best test loss! Saving checkpoint...")
+                self.save_model(f"checkpoints/best_model_epoch_{epoch+1}.pt")
+            else:
+                patience_counter += 1
+                print(f"  No improvement. Patience: {patience_counter}/{patience}")
+            
+            print(f"{'='*60}\n")
+            
+            # Early stopping
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {epoch+1} epochs")
+                print(f"Best test loss: {best_test_loss:.4f}")
+                break
+            
+            # Save regular checkpoint
             if (epoch + 1) % 5 == 0:
                 self.save_model(f"checkpoints/checkpoint_epoch_{epoch+1}.pt")
         
-        print("✓ Training complete!")
+        # Save training history
+        history_file = self.config.get('history_file', 'training_history.json')
+        with open(history_file, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2)
+        
+        print(f"\n{'='*60}")
+        print("TRAINING COMPLETE")
+        print(f"{'='*60}")
+        print(f"  Final train loss: {history['train_loss'][-1]:.4f}")
+        print(f"  Final test loss: {history['test_loss'][-1]:.4f}")
+        print(f"  Best test loss: {best_test_loss:.4f}")
+        print(f"  Training history saved to: {history_file}")
+        print(f"{'='*60}\n")
+        
+        return history
     
     def generate(self, seed_text="मेरा", max_length=100, temperature=0.9, top_k=50):
         """Generate lyrics"""
@@ -403,27 +583,145 @@ class TransformerLyricsTrainer:
         
         self.model.load_state_dict(checkpoint['model_state_dict'])
         print(f"Model loaded from {path}")
+    
+    def plot_training_history(self, history_file='training_history.json'):
+        """Plot training history"""
+        try:
+            import matplotlib.pyplot as plt
+            
+            with open(history_file, 'r') as f:
+                history = json.load(f)
+            
+            fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+            
+            # Loss plot
+            axes[0, 0].plot(history['train_loss'], label='Train Loss', linewidth=2)
+            axes[0, 0].plot(history['test_loss'], label='Test Loss', linewidth=2)
+            axes[0, 0].set_xlabel('Epoch')
+            axes[0, 0].set_ylabel('Loss')
+            axes[0, 0].set_title('Training and Test Loss')
+            axes[0, 0].legend()
+            axes[0, 0].grid(True, alpha=0.3)
+            
+            # Perplexity plot
+            axes[0, 1].plot(history['train_perplexity'], label='Train Perplexity', linewidth=2)
+            axes[0, 1].plot(history['test_perplexity'], label='Test Perplexity', linewidth=2)
+            axes[0, 1].set_xlabel('Epoch')
+            axes[0, 1].set_ylabel('Perplexity')
+            axes[0, 1].set_title('Training and Test Perplexity')
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Learning rate plot
+            axes[1, 0].plot(history['learning_rate'], linewidth=2, color='green')
+            axes[1, 0].set_xlabel('Epoch')
+            axes[1, 0].set_ylabel('Learning Rate')
+            axes[1, 0].set_title('Learning Rate Schedule')
+            axes[1, 0].grid(True, alpha=0.3)
+            
+            # Loss difference plot
+            loss_diff = [abs(t - v) for t, v in zip(history['train_loss'], history['test_loss'])]
+            axes[1, 1].plot(loss_diff, linewidth=2, color='red')
+            axes[1, 1].set_xlabel('Epoch')
+            axes[1, 1].set_ylabel('|Train Loss - Test Loss|')
+            axes[1, 1].set_title('Overfitting Indicator')
+            axes[1, 1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
+            print(f"✓ Training history plot saved to: training_history.png")
+            plt.show()
+            
+        except ImportError:
+            print("matplotlib not installed. Skipping plot generation.")
+        except Exception as e:
+            print(f"Error plotting history: {e}")
 
-
+'''
 # ==================== USAGE ====================
+    """
+    Utility function to verify your dataset format
+    Shows how many songs are detected and previews them
+    """
+    print(f"\n{'='*60}")
+    print("DATASET FORMAT VERIFICATION")
+    print(f"{'='*60}\n")
+    
+    with open(file_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Check for separator
+    if song_separator not in content:
+        print(f"⚠️  WARNING: Separator '{repr(song_separator)}' not found in file!")
+        print(f"   Please check your file format.")
+        return False
+    
+    # Split by separator
+    songs = content.split(song_separator)
+    songs = [s.strip() for s in songs if s.strip()]
+    
+    print(f"✓ File format looks good!")
+    print(f"  Total songs detected: {len(songs)}")
+    print(f"  Separator used: {repr(song_separator)}")
+    
+    # Show first 3 songs
+    print(f"\n{'='*60}")
+    print("SAMPLE SONGS FROM DATASET")
+    print(f"{'='*60}\n")
+    
+    for i, song in enumerate(songs[:3]):
+        print(f"--- Song {i+1} ---")
+        print(song[:300] + "..." if len(song) > 300 else song)
+        print(f"\nWords in this song: {len(song.split())}")
+        print("-" * 60)
+        print()
+    
+    # Statistics
+    word_counts = [len(song.split()) for song in songs]
+    print(f"\nDATASET STATISTICS:")
+    print(f"  Total songs: {len(songs)}")
+    print(f"  Total words: {sum(word_counts):,}")
+    print(f"  Average words per song: {sum(word_counts) // len(songs)}")
+    print(f"  Shortest song: {min(word_counts)} words")
+    print(f"  Longest song: {max(word_counts)} words")
+    
+    return True
+'''
+
 
 if __name__ == "__main__":
 
     os.makedirs("./checkpoints", exist_ok=True)
     os.makedirs("./config", exist_ok=True)
 
+    # import sys
+    
+    # First, verify your dataset format
+    dataset_file = 'lyrics_files/all_hindi_combined3.txt'
+    
+    '''
+    print("Step 1: Verifying dataset format...")
+    if not verify_dataset_format(dataset_file, song_separator='\n--\n'):
+        print("\n❌ Please fix your dataset format first!")
+        sys.exit(1)
+    '''
+        
+    print("\n" + "="*60)
+    print("Dataset verification passed! Starting training...")
+    print("="*60 + "\n")
+    
     # Create config
     config = {
         "language": "hindi",
-        "max_seq_length": 128,
+        "max_seq_length": 128,  # Adjust based on your avg song length
         "d_model": 256,
         "nhead": 8,
         "num_layers": 6,
         "dim_feedforward": 1024,
         "dropout": 0.1,
-        "batch_size": 8,
+        "batch_size": 16,
         "learning_rate": 0.0001,
-        "epochs": 50
+        "epochs": 70
     }
     
     # Save config
@@ -434,7 +732,7 @@ if __name__ == "__main__":
     trainer = TransformerLyricsTrainer('config/transformer_config.json')
     
     # Prepare data
-    sequences = trainer.prepare_data('lyrics_files/all_hindi_combined.txt', song_separator='\n--\n')
+    sequences = trainer.prepare_data(dataset_file, song_separator='\n--\n')
     
     # Train
     trainer.train(sequences)
@@ -444,16 +742,33 @@ if __name__ == "__main__":
     print("GENERATING LYRICS")
     print(f"{'='*60}\n")
     
-    for i in range(3):
-        lyrics = trainer.generate(
-            seed_text="तेरी यादों में",
-            max_length=100,
-            temperature=0.9,
-            top_k=50
-        )
-        print(f"\n--- Generated Lyrics {i+1} ---")
-        print(lyrics)
-        print("-" * 60)
+    seed_texts = [
+        "हम घर से",
+        "मैं हूँ",
+        "तेरी यादों में"
+    ]
+    
+    for seed in seed_texts:
+        print(f"\n{'='*60}")
+        print(f"Seed: '{seed}'")
+        print(f"{'='*60}\n")
+        
+        for i in range(2):
+            lyrics = trainer.generate(
+                seed_text=seed,
+                max_length=100,
+                temperature=0.9,
+                top_k=50
+            )
+            print(f"\n--- Variation {i+1} ---")
+            print(lyrics)
+            print("-" * 60)
     
     # Save final model
     trainer.save_model('checkpoints/transformer_hindi_lyrics.pt')
+    
+    print(f"\n{'='*60}")
+    print("✓ TRAINING COMPLETE!")
+    print(f"{'='*60}")
+    print(f"Model saved to: checkpoints/transformer_hindi_lyrics.pt")
+    print(f"Config saved to: config/transformer_config.json")
