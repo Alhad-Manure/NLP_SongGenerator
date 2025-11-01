@@ -489,7 +489,7 @@ class TransformerLyricsTrainer:
             if avg_test_loss < best_test_loss:
                 best_test_loss = avg_test_loss
                 patience_counter = 0
-                print(f"  ✓ New best test loss! Saving checkpoint...")
+                print(f" New best test loss! Saving checkpoint...")
                 self.save_model(f"checkpoints/best_model_epoch_{epoch+1}.pt")
             else:
                 patience_counter += 1
@@ -629,65 +629,13 @@ class TransformerLyricsTrainer:
             
             plt.tight_layout()
             plt.savefig('training_history.png', dpi=300, bbox_inches='tight')
-            print(f"✓ Training history plot saved to: training_history.png")
+            print(f"Training history plot saved to: training_history.png")
             plt.show()
             
         except ImportError:
             print("matplotlib not installed. Skipping plot generation.")
         except Exception as e:
             print(f"Error plotting history: {e}")
-
-'''
-# ==================== USAGE ====================
-    """
-    Utility function to verify your dataset format
-    Shows how many songs are detected and previews them
-    """
-    print(f"\n{'='*60}")
-    print("DATASET FORMAT VERIFICATION")
-    print(f"{'='*60}\n")
-    
-    with open(file_path, 'r', encoding='utf-8') as f:
-        content = f.read()
-    
-    # Check for separator
-    if song_separator not in content:
-        print(f"⚠️  WARNING: Separator '{repr(song_separator)}' not found in file!")
-        print(f"   Please check your file format.")
-        return False
-    
-    # Split by separator
-    songs = content.split(song_separator)
-    songs = [s.strip() for s in songs if s.strip()]
-    
-    print(f"✓ File format looks good!")
-    print(f"  Total songs detected: {len(songs)}")
-    print(f"  Separator used: {repr(song_separator)}")
-    
-    # Show first 3 songs
-    print(f"\n{'='*60}")
-    print("SAMPLE SONGS FROM DATASET")
-    print(f"{'='*60}\n")
-    
-    for i, song in enumerate(songs[:3]):
-        print(f"--- Song {i+1} ---")
-        print(song[:300] + "..." if len(song) > 300 else song)
-        print(f"\nWords in this song: {len(song.split())}")
-        print("-" * 60)
-        print()
-    
-    # Statistics
-    word_counts = [len(song.split()) for song in songs]
-    print(f"\nDATASET STATISTICS:")
-    print(f"  Total songs: {len(songs)}")
-    print(f"  Total words: {sum(word_counts):,}")
-    print(f"  Average words per song: {sum(word_counts) // len(songs)}")
-    print(f"  Shortest song: {min(word_counts)} words")
-    print(f"  Longest song: {max(word_counts)} words")
-    
-    return True
-'''
-
 
 if __name__ == "__main__":
 
@@ -702,7 +650,7 @@ if __name__ == "__main__":
     '''
     print("Step 1: Verifying dataset format...")
     if not verify_dataset_format(dataset_file, song_separator='\n--\n'):
-        print("\n❌ Please fix your dataset format first!")
+        print("\n Please fix your dataset format first!")
         sys.exit(1)
     '''
         
@@ -768,7 +716,7 @@ if __name__ == "__main__":
     trainer.save_model('checkpoints/transformer_hindi_lyrics.pt')
     
     print(f"\n{'='*60}")
-    print("✓ TRAINING COMPLETE!")
+    print("TRAINING COMPLETE!")
     print(f"{'='*60}")
     print(f"Model saved to: checkpoints/transformer_hindi_lyrics.pt")
     print(f"Config saved to: config/transformer_config.json")
