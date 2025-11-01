@@ -60,12 +60,12 @@ def process_directory(input_dir, output_file, file_extension='.txt'):
                 if hindi_content:  # Only add if there's Hindi content
                     all_content.append(hindi_content)
                     processed_count += 1
-                    print(f"  ✓ Extracted Hindi content")
+                    print(f" Extracted Hindi content")
                 else:
-                    print(f"  ⚠ No Hindi content found")
+                    print(f" No Hindi content found")
                     
             except Exception as e:
-                print(f"  ✗ Error processing {file_path.name}: {e}")
+                print(f"  Error processing {file_path.name}: {e}")
         
         # Combine all content with separator
         combined_content = '\n--\n'.join(all_content)
